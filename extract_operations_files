@@ -1,0 +1,341 @@
+import cx_Oracle
+import pandas as pd
+from datetime import datetime
+import os
+import glob
+
+def execute_query():
+    try:
+        dsn = cx_Oracle.makedsn("xxxxxxxxxxxxxxxxxxx", xxxxx, service_name=";xxxxxxx")
+        connection = cx_Oracle.connect(user='xxxxx', password='xxxxx', dsn=dsn)
+
+        # Query 1 - recebimento
+        sql_query_1 = """
+        SELECT 
+        RI.INVOICE_DATE,
+        RI.INVOICE_NUM NUM_NOTA,
+        OP.OPERATION_ID NUM_OP_FISCAL,
+        OP.ORGANIZATION_ID,
+        OP.STATUS,
+        OP.FREIGHT_FLAG,
+        RI.INVOICE_AMOUNT,
+        OP.ITEM_FACTOR,
+        OP.LOCATION_ID
+        FROM CLL_F189_ENTRY_OPERATIONS OP
+        JOIN CLL_F189_INVOICES RI
+        ON OP.OPERATION_ID = RI.OPERATION_ID
+        WHERE OP.ORGANIZATION_ID = 164 
+        AND RI.INVOICE_DATE >= to_date ('01/01/2024','MM/DD/YYYY')
+        """
+
+        # Query 2 #notas
+        sql_query_2 = """
+                select xpi.creation_date,
+                a.invoice_num Num_Nota,
+                Round(to_number(a.invoice_amount)) as VALOR_NOTA,
+                jbcte.electronic_inv_access_key CHAVE_SEFAZ,
+                xpv.po_number,
+                xpi.cnpj,
+                xpi.cnpj_loja,
+                lpad(c.global_attribute10 || c.global_attribute11 ||
+                        c.global_attribute12,
+                        11,
+                        '0') cpf_fornec,
+                xpi.nome_cliente,
+                xpi.numero_voucher,
+                xpi.email,
+                xpi.telefone
+            from xxbrz_po_iface_stg1   xpi,
+                xxbrz_po_vouchers     xpv,
+                ap_supplier_sites_all c,
+                ap_suppliers          d,
+                ra_customer_trx_all   rcta,
+                jl_br_customer_trx_exts jbcte,
+                cll_f189_invoices a
+            where xpi.organization_id = 164
+            and xpi.status_process = '00001'
+            and xpi.doc_num = xpv.po_number(+)
+            and xpi.org_id = xpv.org_id(+)
+            and xpi.creation_date >= to_date ('01/01/2024', 'MM/DD/YYYY')
+            and  xpv.stage = '30'
+            and xpi.cpf_cnpj = 
+                lpad(c.global_attribute10(+) || c.global_attribute11(+) ||
+                        c.global_attribute12(+),
+                        11,
+                        '0')
+            and c.vendor_id = d.vendor_id(+)
+            and jbcte.electronic_inv_access_key = a.eletronic_invoice_key
+            and xpv.ar_customer_trx_id = rcta.customer_trx_id(+)
+            and xpv.po_number = rcta.attribute1(+)
+            and xpv.org_id = rcta.org_id(+)
+            and rcta.customer_trx_id = jbcte.customer_trx_id(+)
+                    order by xpi.stg1_id
+        """
+
+        # Query 3 -CLIENTE
+        sql_query_3 = """
+        SELECT 
+            assa_t.creation_date,
+            asu_t.vendor_name_alt as NOME,
+            CASE 
+                WHEN LENGTH(TRIM(LEADING '0' FROM assa_t.global_attribute10 || assa_t.global_attribute11 || assa_t.global_attribute12)) <= 11
+                    THEN TRIM(LEADING '0' FROM assa_t.global_attribute10 || assa_t.global_attribute11 || assa_t.global_attribute12)
+            END AS cpf,
+            assa_t.Address_line1 || ', ' || assa_t.Address_line2 || ' - ' || assa_t.city ||  ' - ' || assa_t.state AS ENDERECO
+        FROM 
+            apps.ap_supplier_sites_all assa_t, 
+            apps.ap_suppliers asu_t
+        WHERE 
+            assa_t.vendor_id = asu_t.vendor_id
+            AND assa_t.org_id = 161
+            AND assa_t.creation_date >= to_date('02/01/2024', 'MM/DD/YYYY')
+            AND LENGTH(TRIM(LEADING '0' FROM assa_t.global_attribute10 || assa_t.global_attribute11 || assa_t.global_attribute12)) <= 11
+        """
+
+        # Query 4 - VOUCHER COM PO
+        sql_query_4 = """
+         SELECT 
+       XPIS.CREATION_DATE DATA_CRIAÇÃO,
+       xpis.cpf_cnpj AS cpf,
+       xpis.Nome_Cliente,
+       VOU.PO_NUMBER,
+       VOU.STAGE,
+           CASE
+         WHEN VOU.STAGE = 30 THEN 'Po Gerada e enviada para emissao da nota'
+         WHEN VOU.STAGE = 15 THEN 'PO gerada e NF pendente'
+         WHEN VOU.STAGE = 20 THEN 'PO gerada e NF pendente'
+         WHEN VOU.STAGE = 05 THEN 'PO gerada e NF pendente'
+       END AS PO_STATUS,
+       XPIS.FILE_NAME ARQUIVO
+       FROM xxbrz_po_iface_stg1 xpis,
+       XXBRZ_PO_VOUCHERS VOU       
+        WHERE XPIS.DOC_NUM = vou.po_number
+        AND XPIS.status_process = '00001'
+        AND XPIS.CREATION_DATE >= to_date('01/01/2024','MM/DD/YYYY')
+        AND XPIS.FILE_NAME LIKE '%CAIXA%'
+        --AND (XPIS.DOC_NUM LIKE '%SAM%'
+        --OR XPIS.DOC_NUM LIKE '%SAN%')
+        """
+        # Query 5 - JORNADA_ORACLE
+        sql_query_5 = """                   
+               SELECT distinct to_char(assa_t.creation_date, 'dd/mm/rrrr') as DATA_CAD_CLI,
+                asu_t.vendor_name_alt as NOME,
+                assa_t.global_attribute10 || assa_t.global_attribute11 ||
+                assa_t.global_attribute12 as CPF_CNPJ,
+                xpis.doc_num as PO_GERADA,
+                nvl(vou.po_number, 'NAO GERADA') as GERACAO_NF,
+                CASE
+                  WHEN VOU.STAGE = '05' THEN
+                   'PO gerada e NF pendente'
+                  WHEN VOU.STAGE = '10' THEN
+                   'PO gerada'
+                   WHEN VOU.STAGE = '15' THEN
+                   'PO gerada e NF pendente'
+                   WHEN VOU.STAGE = '20' THEN
+                   'PO gerada e NF pendente'
+                  WHEN VOU.STAGE = '30' THEN
+                   'Po Gerada e enviada para emissao da nota'
+                  WHEN VOU.STAGE = '35' THEN
+                   'NF Revertida ou Devolvida'
+                  WHEN VOU.STAGE = '40' THEN
+                   'INV Triado'
+                  WHEN VOU.STAGE = '45' THEN
+                   'AP:NF em aberto'
+                  WHEN VOU.STAGE = '50' THEN
+                   'AP: Disponível para Pagamento'
+                  WHEN VOU.STAGE = '90' THEN
+                   'PO:Pedido Cancelado'
+                END AS PO_STATUS,
+                rcta.trx_number as NOTA_GERADA,
+                cfi.invoice_num as ENTRADA_ITEM,
+                cfeo.operation_id as Num_RI,
+                cfeo.status AS STATUS_RI,
+                cfeo.Gl_Date,
+                aia.invoice_num as PAGAMENTO,
+                CASE
+                  WHEN nvl(aia.PAYMENT_STATUS_FLAG, 'X') = 'N' THEN
+                   'NAO PAGO'
+                  WHEN nvl(aia.PAYMENT_STATUS_FLAG, 'N') = 'P' THEN
+                   'NFF PARC'
+                  WHEN apsa.HOLD_FLAG = 'Y' THEN
+                   'RETIDO'
+                  WHEN apsa.payment_status_flag = 'Y' THEN
+                   'BCO REM'
+                  WHEN aida_x.match_status_flag = 'A' AND
+                       aia.WFAPPROVAL_STATUS in
+                       ('WFAPPROVED', 'NOT REQUIRED') and 
+                       aia.cancelled_date is not null THEN
+                   'CANC'
+                  WHEN aida_x.match_status_flag = 'A' AND
+                       aia.WFAPPROVAL_STATUS in
+                       ('WFAPPROVED', 'NOT REQUIRED') THEN
+                   'PRC PMT'
+                END STATUS_PAGAMENTO,
+                ip.accounting_date as DATA_PAGAMENTO,
+                aia.amount_paid VALOR_NOTA
+        FROM apps.ap_supplier_sites_all assa_t,
+        apps.ap_suppliers asu_t,
+        xxbrz_po_iface_stg1 xpis,
+        XXBRZ_PO_VOUCHERS VOU,
+        ra_customer_trx_all rcta,
+        cll_f189_entry_operations cfeo,
+        cll_f189_invoices cfi,
+        ap_invoices_all aia,
+        APPS.AP_PAYMENT_SCHEDULES_all apsa,
+        ap_invoice_payments_all ip,
+       (select aida.rowid,
+               aila.org_id,
+               aila.invoice_id,
+               aida.match_status_flag,
+               aida.cancellation_flag
+          from ap_invoice_lines_all aila, ap_invoice_distributions_all aida
+         where aila.invoice_id = aida.invoice_id
+           AND aila.org_id = aida.org_id
+           AND aila.line_number = aida.invoice_line_number) aida_x
+            where xpis.org_id = 161
+            and xpis.creation_date >= to_date('02/01/2024', 'MM/DD/YYYY')
+                ---and rcta.trx_number = 7728
+            and xpis.doc_num = vou.po_number(+)
+            and xpis.org_id = vou.org_id(+)
+            and xpis.organization_id = vou.organization_id(+)
+                -- AP Suppliers
+            AND TRIM(lpad(assa_t.global_attribute10(+) ||
+                            assa_t.global_attribute11(+) ||
+                            assa_t.global_attribute12(+),
+                            11,
+                            '0')) = lpad(xpis.cpf_cnpj, 11, '0')
+            and assa_t.vendor_id = asu_t.vendor_id(+)
+            and assa_t.org_id(+) = xpis.org_id
+                -- AR
+            and vou.ar_customer_trx_id = rcta.customer_trx_id(+)
+            and vou.org_id = rcta.org_id(+)
+                -- RI
+                ---- and vou.ri_invoice_id = cfi.invoice_id(+)
+            and rcta.trx_number = cfi.invoice_num(+)
+            and vou.organization_id = cfi.organization_id(+)
+                and cfi.operation_id = cfeo.operation_id(+)
+            and cfi.organization_id = cfeo.organization_id(+)
+            --
+            and assa_t.vendor_id = aia.vendor_id(+)
+            and assa_t.vendor_site_id = aia.vendor_site_id(+)
+                -- AP Pagto
+                --and vou.ap_invoice_id = aia.invoice_id(+)
+            and cfi.invoice_num_ap = aia.invoice_num(+)
+            and vou.org_id = aia.org_id(+)
+            and aia.invoice_id = apsa.invoice_id(+)
+            AND aia.org_id = apsa.org_id(+)
+            and aia.org_id = aida_x.org_id(+)
+            and aia.invoice_id = aida_x.invoice_id(+)
+            and aia.invoice_id = ip.invoice_id (+)
+            --FIltros
+            and xpis.doc_num like '%SA%'
+            and xpis.file_name like '%CAIXA%'
+            --and cfeo.status = 'COMPLETE'
+            AND cfeo.Gl_Date  >= to_date('01/01/2024', 'MM/DD/YYYY')
+            AND asu_t.vendor_name_alt LIKE '%PATRICIA%MATTOS%'
+"""
+
+        # Executar as consultas SQL
+        cursor = connection.cursor()
+        cursor.execute(sql_query_1)
+        results_1 = cursor.fetchall()
+
+        cursor.execute(sql_query_2)
+        results_2 = cursor.fetchall()
+
+        cursor.execute(sql_query_3)
+        results_3 = cursor.fetchall()
+
+        cursor.execute(sql_query_4)
+        results_4 = cursor.fetchall()
+
+        cursor.execute(sql_query_5)
+        results_5 = cursor.fetchall()
+
+        cursor.close()
+        connection.close()
+
+        return results_1, results_2, results_3, results_4, results_5
+
+    except cx_Oracle.DatabaseError as e:
+        print("Erro ao conectar ao banco de dados:", e)
+        return None, None, None, None, None
+
+def save_to_csv(data, directory, prefix=None, columns=None):
+    try:
+        now = datetime.now()
+        timestamp = now.strftime("%Y%m%d%H%M")
+
+        if prefix:
+            file_name = f"{prefix}_{timestamp}.csv"
+        else:
+            file_name = f"{timestamp}.csv"
+
+        df = pd.DataFrame(data, columns=columns) if columns else pd.DataFrame(data)
+
+        file_path = os.path.join(directory, file_name)
+        
+        # Excluir o último arquivo salvo na pasta
+        files = glob.glob(os.path.join(directory, "*"))
+        if len(files) > 0:
+            latest_file = max(files, key=os.path.getctime)
+            os.remove(latest_file)
+
+        df.to_csv(file_path, index=False)
+
+        print(f"Arquivo salvo com sucesso: {file_path}")
+        return file_path
+
+    except Exception as e:
+        print("Erro ao salvar o arquivo CSV:", e)
+        return None
+
+def save_query_3_to_csv(data):
+    directory = r'C:\Users\re3za4\OneDrive - Assurant, Inc\Resp. Fernanda - Relatorios Oracle\A_CADASTRO_DE_CLIENTES'
+    prefix = "Clientes_cadastrados"
+    columns = ["CREATION_DATE", "NOME", "CPF", "ENDERECO"]
+    return save_to_csv(data, directory, prefix, columns)
+
+def save_query_4_to_csv(data):
+    directory = r'C:\Users\re3za4\OneDrive - Assurant, Inc\Resp. Fernanda - Relatorios Oracle\B_CRIACAO_DE_POS'
+    prefix = "POS_Criadas"
+    columns = ["CREATION_DATE", "CPF", "NOME_CLIENTE", "PO_NUMBER","STAGE", "PO_STATUS", "FILE_NAME"]
+    return save_to_csv(data, directory, prefix, columns)
+
+
+def save_query_5_to_csv(data):
+    directory = r'C:\Users\re3za4\OneDrive - Assurant, Inc\Resp. Fernanda - Relatorios Oracle\E_JORNADA_ORACLE'
+    prefix = "Jornada_oracle"
+    columns = ["DATA_CAD_CLI", "NOME", "CPF_CNPJ", "PO_GERADA", "GERACAO_NF", "PO_STATUS", "NOTA_GERADA", "ENTRADA_ITEM","PAGAMENTO","STATUS_PAGAMENTO","VALOR_NOTA"]
+    
+    return save_to_csv(data, directory, prefix, columns)
+
+def run_robot():
+    query_results_1, query_results_2, query_results_3, query_results_4, query_results_5 = execute_query()
+
+    if query_results_1 and query_results_2 and query_results_3 and query_results_4 and query_results_5:
+        # Salvar os resultados da primeira consulta
+        directory_1 = r'C:\Users\re3za4\OneDrive - Assurant, Inc\Resp. Fernanda - Relatorios Oracle\D_RECEBIMENTO_ITENS'
+        file_path_1 = save_to_csv(query_results_1, directory_1, "Recebimento", columns=["INVOICE_DATE", "NUM_NOTA", "NUM_OP_FISCAL", "ORGANIZATION_ID", "STATUS", "FREIGHT_FLAG", "INVOICE_AMOUNT", "ITEM_FACTOR", "LOCATION_ID"])
+
+        # Salvar os resultados da segunda consulta
+        directory_2 = r'C:\Users\re3za4\OneDrive - Assurant, Inc\Resp. Fernanda - Relatorios Oracle\C_EMISSAO_NOTAS'
+        file_path_2 = save_to_csv(query_results_2, directory_2, "Notas", columns=["CREATION_DATE", "Num_Nota", "VALOR_NOTA", "CHAVE_SEFAZ", "PO_NUMBER", "CNPJ", "CNPJ_LOJA", "CPF_FORNEC", "NOME_CLIENTE", "NUMERO_VOUCHER", "EMAIL", "TELEFONE"])
+        
+        # Salvar os resultados da query 3
+        file_path_3 = save_query_3_to_csv(query_results_3)
+
+        # Salvar os resultados da query 4
+        file_path_4 = save_query_4_to_csv(query_results_4)
+
+        # Salvar os resultados da query 5 com as instruções
+        file_path_5 = save_query_5_to_csv(query_results_5)
+
+        if file_path_1 and file_path_2 and file_path_3 and file_path_4 and file_path_5:
+            print("DEU BOM!! Arquivos CSV salvos com sucesso.")
+        else:
+            print("Falha ao salvar os arquivos CSV.")
+    else:
+        print("Falha ao executar as consultas.")
+
+run_robot()
